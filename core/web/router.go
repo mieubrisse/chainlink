@@ -306,45 +306,56 @@ func v2Routes(app chainlink.Application, r *gin.RouterGroup) {
 	userOrEI.GET("/ping", ping.Show)
 }
 
+var staticAssetsRateLimitPeriod = 1 * time.Minute
+var staticAssetsRateLimit = int64(27) * 10 // There are 27 JS assets being served
+var indexRateLimitPeriod = 1 * time.Minute
+var indexRateLimit = int64(10)
+
 func guiAssetRoutes(box packr.Box, engine *gin.Engine) {
-	boxList := box.List()
+	// Serve JS files
+	assetsRouter := engine.Group("/assets", rateLimiter(
+		staticAssetsRateLimitPeriod,
+		staticAssetsRateLimit,
+	))
+	assetsRouter.StaticFS("/", http.FileSystem(box))
 
-	engine.NoRoute(func(c *gin.Context) {
-		path := c.Request.URL.Path
-		matchedBoxPath := MatchExactBoxPath(boxList, path)
+	engine.NoRoute(
+		rateLimiter(
+			indexRateLimitPeriod,
+			indexRateLimit,
+		),
+		func(c *gin.Context) {
+			path := c.Request.URL.Path
 
-		var is404 bool
-		if matchedBoxPath == "" {
-			isApiRequest, _ := regexp.MatchString(`^/v[0-9]+/.*`, path)
-
-			if filepath.Ext(path) != "" {
-				is404 = true
-			} else if isApiRequest {
-				is404 = true
-			} else {
-				matchedBoxPath = "index.html"
-			}
-		}
-
-		if is404 {
-			c.AbortWithStatus(http.StatusNotFound)
-			return
-		}
-
-		file, err := box.Open(matchedBoxPath)
-		if err != nil {
-			if err == os.ErrNotExist {
+			// Return a 404 if the path is an unmatched API path
+			if match, _ := regexp.MatchString(`^/v[0-9]+/.*`, path); match {
 				c.AbortWithStatus(http.StatusNotFound)
-			} else {
-				logger.Errorf("failed to open static file '%s': %+v", path, err)
-				c.AbortWithStatus(http.StatusInternalServerError)
-			}
-			return
-		}
-		defer logger.ErrorIfCalling(file.Close, "failed when close file")
 
-		http.ServeContent(c.Writer, c.Request, path, time.Time{}, file)
-	})
+				return
+			}
+
+			// Return a 404 for unknown extensions
+			if filepath.Ext(path) != "" {
+				c.AbortWithStatus(http.StatusNotFound)
+
+				return
+			}
+
+			// Render the React index page for any other unknown requests
+			file, err := box.Open("index.html")
+			if err != nil {
+				if err == os.ErrNotExist {
+					c.AbortWithStatus(http.StatusNotFound)
+				} else {
+					logger.Errorf("failed to open static file '%s': %+v", path, err)
+					c.AbortWithStatus(http.StatusInternalServerError)
+				}
+
+			}
+			defer logger.ErrorIfCalling(file.Close, "failed when close file")
+
+			http.ServeContent(c.Writer, c.Request, path, time.Time{}, file)
+		})
 }
 
 // Inspired by https://github.com/gin-gonic/gin/issues/961
@@ -458,11 +469,11 @@ func redact(values url.Values) string {
 
 // NOTE: keys must be in lowercase for case insensitive match
 var blacklist = map[string]struct{}{
-	"password":             struct{}{},
-	"newpassword":          struct{}{},
-	"oldpassword":          struct{}{},
-	"current_password":     struct{}{},
-	"new_account_password": struct{}{},
+	"password":             {},
+	"newpassword":          {},
+	"oldpassword":          {},
+	"current_password":     {},
+	"new_account_password": {},
 }
 
 func isBlacklisted(k string) bool {
